@@ -1,0 +1,13 @@
+{
+  "name": "claude-agent-continuity",
+  "version": "0.1.0",
+  "description": "Never lose a cut-off Claude Code subagent's work: safe WIP commits per git worktree, worktree status, and resume prompts.",
+  "type": "module",
+  "bin": { "claude-agent-continuity": "bin/claude-agent-continuity.mjs" },
+  "main": "src/index.mjs",
+  "files": ["bin", "src", "README.md", "LICENSE"],
+  "scripts": { "test": "node --test test/continuity.test.mjs" },
+  "engines": { "node": ">=18" },
+  "keywords": ["claude-code", "agents", "git-worktree", "hooks"],
+  "license": "MIT"
+}
