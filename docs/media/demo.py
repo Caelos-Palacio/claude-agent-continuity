@@ -75,7 +75,7 @@ def wrap(s, cols):
     return out + [cur]
 
 
-def term_lines(d, t, lines, x, y, lh=17, size=13, alpha=1.0, cps=55):
+def term_lines(d, t, lines, x, y, lh=17, size=13, alpha=1.0, cps=34):
     """lines: dicts {t, segs, type?}. Typed lines reveal at cps chars/s with a block cursor; others appear at t."""
     cur_line = None
     for i, L in enumerate(lines):
@@ -97,15 +97,18 @@ def term_lines(d, t, lines, x, y, lh=17, size=13, alpha=1.0, cps=55):
         d.rectangle([cx + 1, y + cur_line[0] * lh + 1, cx + 8, y + cur_line[0] * lh + size + 2], fill=mix(FG, 0.8 * alpha))
 
 
-def rbox(d, xy, label, color, alpha=1.0, fill=PANEL, size=12, sub=None):
+def rbox(d, xy, label, color, alpha=1.0, fill=PANEL, size=13, sub=None, idle=False):
+    """node box. idle: outline LINE + muted label (still legible, visually recessive)."""
     x0, y0, x1, y1 = xy
-    d.rounded_rectangle(xy, 6, fill=mix(fill, alpha), outline=mix(color, alpha), width=2)
+    oc = LINE if idle else color
+    d.rounded_rectangle(xy, 6, fill=mix(fill, alpha), outline=mix(oc, alpha), width=2)
     f = font(size)
-    w = f.getlength(label)
-    d.text(((x0 + x1) / 2 - w / 2, (y0 + y1) / 2 - size / 2 - (6 if sub else 2)), label, font=f, fill=mix(FG, alpha))
+    lc = MUTED if idle else FG
+    cy = (y0 + y1) / 2
+    d.text(((x0 + x1) / 2 - f.getlength(label) / 2, cy - size / 2 - (8 if sub else 2)), label, font=f, fill=mix(lc, alpha))
     if sub:
-        f2 = font(size - 2)
-        d.text(((x0 + x1) / 2 - f2.getlength(sub) / 2, (y0 + y1) / 2 + 4), sub, font=f2, fill=mix(color, alpha))
+        f2 = font(size - 1)
+        d.text(((x0 + x1) / 2 - f2.getlength(sub) / 2, cy + 6), sub, font=f2, fill=mix(MUTED if idle else color, alpha))
 
 
 def arrow(d, a, b, color, alpha=1.0, prog=1.0):
@@ -122,18 +125,18 @@ def dot(d, a, b, p, color, alpha=1.0, r=4):
 
 
 def frame_base(title, subtitle):
+    """hierarchy: title (accent, 22) > subtitle (muted, 13) > hairline > content; 32 px margins"""
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    d.text((24, 16), title, font=font(18), fill=ACCENT)
-    d.text((24, 42), subtitle, font=font(12), fill=MUTED)
+    d.text((32, 22), title, font=font(22), fill=ACCENT)
+    d.text((32, 54), subtitle, font=font(13), fill=MUTED)
+    d.line([(32, 82), (W - 32, 82)], fill=LINE)
     return img, d
 
 
 def panel(d, xy, title, alpha=1.0):
-    d.rounded_rectangle(xy, 8, fill=mix(PANEL, 1), outline=LINE)
-    for i, c in enumerate((ERR, WARN, OK)):
-        d.ellipse([xy[0] + 12 + i * 16, xy[1] + 10, xy[0] + 21 + i * 16, xy[1] + 19], fill=mix(c, 0.7))
-    d.text((xy[0] + 70, xy[1] + 7), title, font=font(11), fill=MUTED)
+    d.rounded_rectangle(xy, 8, fill=PANEL, outline=LINE)
+    d.text((xy[0] + 14, xy[1] + 8), title, font=font(11), fill=MUTED)
 
 
 def build(render, duration, out, keep=None):
@@ -221,10 +224,15 @@ def page(step, t0):
     lines = [{"t": t0, "type": True, "segs": [("$ ", OK), (step["cmd"], FG)]}]
     t = t0 + len(step["cmd"]) / 55 + 0.35
     for raw in step["out"].split("\n"):
-        for w in (wrap(raw, 108) if len(raw) > 112 else [raw]):
+        for w in (wrap(raw, 84) if len(raw) > 112 else [raw]):
             lines.append({"t": t, "segs": colorize(w) if w else [("", FG)]})
         t += 0.12
     return lines
+
+
+def fit(step):
+    n = max(len(l) if len(l) <= 112 else 84 for l in step["out"].split("\n"))
+    return max(11, min(13, int(700 / (0.6 * n))))
 
 
 def load():
@@ -238,31 +246,30 @@ SC = [(0.4, 3.4), (3.4, 5.6), (5.6, 11.0)]
 def render(t, cap=None):
     cap = cap or load()
     img, d = frame_base("claude-agent-continuity", "never lose a cut-off Claude Code subagent's work")
-    panel(d, (24, 68, 776, 280), "~/work/myapp  (output captured from the real CLI)")
+    panel(d, (32, 96, 768, 282), "~/work/myapp   output captured from the real CLI")
     for (a, b), step in zip(SC, cap):
         al = window(t, a, b)
         if al > 0:
             lines = page(step, a + 0.2)
             layer = Image.new("RGB", (W, H), PANEL); ld = ImageDraw.Draw(layer)
-            term_lines(ld, t, lines, 36, 92, lh=16, size=11, alpha=1.0, cps=55)
+            sz = fit(step)
+            term_lines(ld, t, lines, 46, 122, lh=sz + 6, size=sz, alpha=1.0, cps=55)
             mask = Image.new("L", (W, H), 0)
-            ImageDraw.Draw(mask).rectangle([26, 90, 774, 278], fill=round(255 * al))
+            ImageDraw.Draw(mask).rectangle([34, 120, 766, 280], fill=round(255 * al))
             img.paste(layer, (0, 0), mask)
     # diagram: cut-off agent -> WIP commit -> resume prompt
-    dy = 322
-    s1, s2, s3 = [ease(seg(t, a, a + 0.5)) for a in (0.9, 4.5, 6.9)]
+    dy = 312
     g = window(t, 0.3, 11.2)
-    rbox(d, (40, dy, 240, dy + 72), "agent worktree", ERR if t < 4.5 else OK, g,
+    s2, s3 = ease(seg(t, 4.5, 5.0)), ease(seg(t, 6.9, 7.4))
+    rbox(d, (32, dy, 242, dy + 84), "agent worktree", ERR if t < 4.5 else OK, g,
          sub="cut off, 3 files dirty" if t < 4.5 else "all committed")
-    rbox(d, (300, dy, 500, dy + 72), "WIP commit", OK if t >= 4.5 else LINE, g * (0.35 + 0.65 * s2),
-         sub="agent/auth +2" if t >= 5.0 else "pending")
-    rbox(d, (560, dy, 760, dy + 72), "resume prompt", ACCENT if t >= 6.9 else LINE, g * (0.35 + 0.65 * s3),
-         sub="reads handoff + git log" if t >= 7.4 else "pending")
-    arrow(d, (240, dy + 32), (300, dy + 32), WARN, g * s2, ease(seg(t, 4.5, 5.0)))
-    arrow(d, (500, dy + 32), (560, dy + 32), ACCENT, g * s3, ease(seg(t, 6.9, 7.4)))
-    if 4.5 <= t < 5.0: dot(d, (240, dy + 32), (300, dy + 32), ease(seg(t, 4.5, 5.0)), WARN, g)
-    if 6.9 <= t < 7.4: dot(d, (500, dy + 32), (560, dy + 32), ease(seg(t, 6.9, 7.4)), ACCENT, g)
-    d.text((40, dy + 84), "zero dependencies · Node >= 18 · hook: SubagentStop + Stop", font=font(11), fill=mix(MUTED, g))
+    rbox(d, (295, dy, 505, dy + 84), "WIP commit", OK, g, sub="agent/auth +2" if t >= 5.0 else "pending", idle=t < 4.5)
+    rbox(d, (558, dy, 768, dy + 84), "resume prompt", ACCENT, g, sub="reads handoff + git log" if t >= 7.4 else "pending", idle=t < 6.9)
+    arrow(d, (242, dy + 42), (295, dy + 42), OK, g, s2)
+    arrow(d, (505, dy + 42), (558, dy + 42), ACCENT, g, s3)
+    if 4.5 <= t < 5.0: dot(d, (242, dy + 42), (295, dy + 42), s2, OK, g)
+    if 6.9 <= t < 7.4: dot(d, (505, dy + 42), (558, dy + 42), s3, ACCENT, g)
+    d.text((32, 414), "zero dependencies  |  Node >= 18  |  Claude Code hooks: SubagentStop, Stop", font=font(12), fill=mix(MUTED, g))
     return img
 
 
