@@ -1,0 +1,14 @@
+[
+  {
+    "cmd": "claude-agent-continuity status",
+    "out": "1 worktrees (base main), 1 with unintegrated work\n\n* agent-auth                   agent/auth                     +1 commits  3 dirty  handoff: docs/handoff/auth.md\n    0 seconds ago | auth: scaffold"
+  },
+  {
+    "cmd": "claude-agent-continuity wip",
+    "out": "WIP saved: agent-auth (3 files)"
+  },
+  {
+    "cmd": "claude-agent-continuity resume agent-auth",
+    "out": "-- agent-auth (agent/auth)\nYou were interrupted (usage limit, watchdog or kill). Your work is saved as WIP commits on branch agent/auth in ~/work/agent-auth. Read ~/work/agent-auth/docs/handoff/auth.md first, check git status and git log, then continue the task where you left off. Commit often and keep the handoff up to date."
+  }
+]
