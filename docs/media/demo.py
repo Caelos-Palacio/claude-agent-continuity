@@ -130,6 +130,16 @@ def node(cv, x0, y0, x1, y1, label, sub, color, idle=False):
         cv.text(cx, cy + 12, sub, 12, MUTED if idle else color, anchor='mm')
 
 
+def _plain(cv, x, y, s, size, color, a):
+    """terminal text without programming ligatures (so '<!--' stays literal)"""
+    if a <= .01 or not s:
+        return
+    try:
+        cv.d.text((x * S, y * S), s, font=font(size), fill=rgb(color, a), features=['-liga', '-calt'])
+    except (KeyError, ValueError, OSError):
+        cv.text(x, y, s, size, color, a)
+
+
 def term(cv, t, lines, x, y, lh, size, cps=55, al=1.0):
     """lines: [{t, segs:[(text,color)], type?}]; typed lines reveal at cps with a block cursor."""
     cur = None
@@ -147,7 +157,7 @@ def term(cv, t, lines, x, y, lh, size, cps=55, al=1.0):
             if left <= 0:
                 break
             part = s[:left]
-            cv.text(cx, y + i * lh, part, size, c, a=al)
+            _plain(cv, cx, y + i * lh, part, size, c, al)
             cx += cv.width(part, size)
             left -= len(s)
     if cur and int(t * 2.5) % 2 == 0:
