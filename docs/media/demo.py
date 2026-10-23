@@ -1,177 +1,185 @@
 #!/usr/bin/env python3
-# ---- shared motion-graphics kit (suite style: 800x450, 15 fps, #0d1117) ----
-import json, os, shutil, subprocess, sys, tempfile
+# ---- suite kit (identical in every repo): 800x450, 15 fps, pure render(t) -> image ----
+import os, sys, shutil, subprocess, tempfile, json
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
-W, H, FPS = 800, 450, 15
-BG, FG, MUTED = (13, 17, 23), (230, 237, 243), (139, 148, 158)
-ACCENT, OK, ERR, WARN = (88, 166, 255), (63, 185, 80), (248, 81, 73), (210, 153, 34)
-PANEL, LINE = (22, 27, 34), (48, 54, 61)
+W, H, FPS, S = 800, 450, 15, 2          # S = supersampling factor
+BG, TEXT, MUTED = '#0d1117', '#e6edf3', '#8b949e'
+ACCENT, OK, ERROR, WARN = '#58a6ff', '#3fb950', '#f85149', '#d29922'
+FONT_DIRS = [Path.home() / '.local/share/fonts/JetBrainsMonoNerd']
+FALLBACK = ['/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf']
+FONT_FILES = {False: 'JetBrainsMonoNerdFont-Regular.ttf', True: 'JetBrainsMonoNerdFont-Bold.ttf'}
+
+
+def rgb(h, a=1.0):
+    h = h.lstrip('#')
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), round(255 * max(0, min(1, a))))
+
+
+def clamp(x): return max(0.0, min(1.0, x))
+def seg(t, a, b): return clamp((t - a) / (b - a))
+def ease(x): x = clamp(x); return 4 * x ** 3 if x < .5 else 1 - (-2 * x + 2) ** 3 / 2   # cubic in-out
+def lerp(a, b, k): return a + (b - a) * k
+def typed(s, t, t0, cps=55): return s[:max(0, int((t - t0) * cps))]
+
+
+_fonts = {}
+def font(size, bold=False):
+    key = (size, bold)
+    if key not in _fonts:
+        cands = [d / FONT_FILES[bold] for d in FONT_DIRS] + [Path(p) for p in FALLBACK]
+        path = next(p for p in cands if p.exists())
+        _fonts[key] = ImageFont.truetype(str(path), round(size * S))
+    return _fonts[key]
+
+
+class Cv:
+    def __init__(self):
+        self.img = Image.new('RGB', (W * S, H * S), BG)
+        self.d = ImageDraw.Draw(self.img, 'RGBA')
+
+    def text(self, x, y, s, size=13, color=TEXT, a=1.0, bold=False, anchor='la'):
+        if a > .01 and s:
+            self.d.text((x * S, y * S), s, font=font(size, bold), fill=rgb(color, a), anchor=anchor)
+
+    def width(self, s, size=13, bold=False): return font(size, bold).getlength(s) / S
+
+    def box(self, x0, y0, x1, y1, outline=MUTED, a=1.0, fill=None, fa=1.0, r=6, w=1):
+        self.d.rounded_rectangle([x0 * S, y0 * S, x1 * S, y1 * S], radius=r * S,
+                                 outline=rgb(outline, a), width=round(w * S),
+                                 fill=rgb(fill, fa) if fill else None)
+
+    def line(self, x0, y0, x1, y1, color=MUTED, a=1.0, w=1, dash=0):
+        if not dash:
+            self.d.line([x0 * S, y0 * S, x1 * S, y1 * S], fill=rgb(color, a), width=round(w * S))
+            return
+        n = int(max(abs(x1 - x0), abs(y1 - y0)) // dash)
+        for i in range(0, n, 2):
+            p, q = i / n, min(1, (i + 1) / n)
+            self.d.line([lerp(x0, x1, p) * S, lerp(y0, y1, p) * S, lerp(x0, x1, q) * S, lerp(y0, y1, q) * S],
+                        fill=rgb(color, a), width=round(w * S))
+
+    def arrow(self, x0, y0, x1, y1, color=MUTED, a=1.0):
+        self.line(x0, y0, x1, y1, color, a)
+        s = 1 if x1 > x0 else -1
+        self.d.polygon([(x1 * S, y1 * S), ((x1 - 7 * s) * S, (y1 - 4) * S), ((x1 - 7 * s) * S, (y1 + 4) * S)], fill=rgb(color, a))
+
+    def dot(self, x, y, color=ACCENT, a=1.0, r=4.5):
+        self.d.ellipse([(x - r) * S, (y - r) * S, (x + r) * S, (y + r) * S], fill=rgb(color, a))
+        self.d.ellipse([(x - r * 2) * S, (y - r * 2) * S, (x + r * 2) * S, (y + r * 2) * S], fill=rgb(color, a * .16))
+
+
+def envelope(t, T, fade=.5):
+    """Loop envelope: blank at t=0 and t=T, so the GIF loops seamlessly."""
+    return ease(seg(t, 0, fade)) * (1 - ease(seg(t, T - fade, T)))
+
+
+def finish(cv, t, T):
+    blank = Image.new('RGB', cv.img.size, BG)
+    img = Image.blend(blank, cv.img, envelope(t, T))
+    return img.resize((W, H), Image.LANCZOS)
+
+
+def build(render, T, out, frame=None):
+    if frame is not None:
+        render(frame).save(out); return
+    n = round(T * FPS)
+    with tempfile.TemporaryDirectory() as tmp:
+        for i in range(n):
+            render(i / FPS).save(f'{tmp}/f{i:04d}.png')
+        pal = f'{tmp}/pal.png'
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', str(FPS), '-i', f'{tmp}/f%04d.png',
+                        '-vf', 'palettegen=max_colors=128:stats_mode=full', pal], check=True)
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-framerate', str(FPS), '-i', f'{tmp}/f%04d.png', '-i', pal,
+                        '-lavfi', 'paletteuse=dither=none', '-loop', '0', str(out)], check=True)
+    print(f'{out}: {n} frames, {T}s, {Path(out).stat().st_size / 1e6:.2f} MB')
+
+
+def cli(render, T, default_out):
+    a = sys.argv[1:]
+    if a[:1] == ['--frame']:          # python demo.py --frame 5.5 out.png
+        build(render, T, a[2], float(a[1]))
+    else:
+        build(render, T, a[0] if a else default_out)
+# ---- end kit ----
+
+# ---- local helpers (per-demo): terminal panel, node boxes ----
 HERE = Path(__file__).resolve().parent
+PANEL, LINE = '#161b22', '#30363d'
 
 
-def ease(x):
-    """ease-in-out cubic on [0, 1]"""
-    x = min(1.0, max(0.0, x))
-    return 4 * x ** 3 if x < 0.5 else 1 - (-2 * x + 2) ** 3 / 2
+def header(cv, title, subtitle):
+    cv.text(32, 20, title, 22, ACCENT)
+    cv.text(32, 52, subtitle, 13, MUTED)
+    cv.line(32, 82, W - 32, 82, LINE)
 
 
-def seg(t, a, b):
-    """progress of t through [a, b], clamped to [0, 1]"""
-    return min(1.0, max(0.0, (t - a) / (b - a))) if b > a else float(t >= a)
+def panel(cv, box, label):
+    x0, y0, x1, y1 = box
+    cv.box(x0, y0, x1, y1, LINE, 1, fill=PANEL, r=8)
+    cv.text(x0 + 14, y0 + 8, label, 11, MUTED)
 
 
-def window(t, a, b, fade=0.35):
-    """alpha: eased fade in at a, eased fade out ending at b"""
-    return ease(seg(t, a, a + fade)) * (1 - ease(seg(t, b - fade, b)))
+def node(cv, x0, y0, x1, y1, label, sub, color, idle=False):
+    cv.box(x0, y0, x1, y1, LINE if idle else color, 1, fill=PANEL, r=6, w=2)
+    cx = (x0 + x1) / 2
+    cy = (y0 + y1) / 2
+    cv.text(cx, cy - 10, label, 13, MUTED if idle else TEXT, anchor='mm')
+    if sub:
+        cv.text(cx, cy + 12, sub, 12, MUTED if idle else color, anchor='mm')
 
 
-_FONTS = {}
-def font(size):
-    if size not in _FONTS:
-        for p in (Path.home() / ".local/share/fonts/JetBrainsMonoNerd/JetBrainsMonoNerdFont-Regular.ttf",
-                  Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")):
-            if p.exists():
-                _FONTS[size] = ImageFont.truetype(str(p), size)
-                break
-        else:
-            _FONTS[size] = ImageFont.load_default()
-    return _FONTS[size]
-
-
-def mix(c, alpha, bg=BG):
-    return tuple(round(bg[i] + (c[i] - bg[i]) * alpha) for i in range(3))
-
-
-def text(d, xy, segs, size=13, alpha=1.0, bg=BG):
-    """draw [(string, color), ...] left to right; returns end x"""
-    x, y = xy
-    f = font(size)
-    for s, c in segs:
-        d.text((x, y), s, font=f, fill=mix(c, alpha, bg))
-        x += f.getlength(s)
-    return x
-
-
-def typed(segs, n):
-    """first n characters of a segment list"""
-    out = []
-    for s, c in segs:
-        if n <= 0:
+def term(cv, t, lines, x, y, lh, size, cps=55, al=1.0):
+    """lines: [{t, segs:[(text,color)], type?}]; typed lines reveal at cps with a block cursor."""
+    cur = None
+    for i, L in enumerate(lines):
+        if t < L['t']:
             break
-        out.append((s[:n], c))
-        n -= len(s)
-    return out
+        segs = L['segs']
+        n = sum(len(s) for s, _ in segs)
+        k = n if not L.get('type') else min(n, max(0, int((t - L['t']) * cps)))
+        if L.get('type') and k < n + 1:
+            cur = (i, k)
+        cx = x
+        left = k
+        for s, c in segs:
+            if left <= 0:
+                break
+            part = s[:left]
+            cv.text(cx, y + i * lh, part, size, c, a=al)
+            cx += cv.width(part, size)
+            left -= len(s)
+    if cur and int(t * 2.5) % 2 == 0:
+        i, k = cur
+        cx = x + cv.width('M', size) * k
+        cv.d.rectangle([(cx + 1) * S, (y + i * lh + 1) * S, (cx + 8) * S, (y + i * lh + size + 3) * S], fill=rgb(TEXT, .8 * al))
+
+
+def window(t, a, b, f=.35):
+    return ease(seg(t, a, a + f)) * (1 - ease(seg(t, b - f, b)))
 
 
 def wrap(s, cols):
-    out, cur = [], ""
-    for w in s.split(" "):
+    out, cur = [], ''
+    for w in s.split(' '):
         if cur and len(cur) + 1 + len(w) > cols:
             out.append(cur); cur = w
         else:
-            cur = (cur + " " + w).strip()
+            cur = (cur + ' ' + w).strip()
     return out + [cur]
-
-
-def term_lines(d, t, lines, x, y, lh=17, size=13, alpha=1.0, cps=34):
-    """lines: dicts {t, segs, type?}. Typed lines reveal at cps chars/s with a block cursor; others appear at t."""
-    cur_line = None
-    for i, L in enumerate(lines):
-        if t < L["t"]:
-            break
-        segs = L["segs"]
-        n = sum(len(s) for s, _ in segs)
-        if L.get("type"):
-            k = int((t - L["t"]) * cps)
-            shown = typed(segs, min(n, k))
-            if k < n + 4:
-                cur_line = (i, sum(len(s) for s, _ in shown))
-        else:
-            shown = segs
-        text(d, (x, y + i * lh), shown, size, alpha)
-    if cur_line and int(t * 2.5) % 2 == 0:
-        i, k = cur_line
-        cx = x + font(size).getlength("M") * k
-        d.rectangle([cx + 1, y + cur_line[0] * lh + 1, cx + 8, y + cur_line[0] * lh + size + 2], fill=mix(FG, 0.8 * alpha))
-
-
-def rbox(d, xy, label, color, alpha=1.0, fill=PANEL, size=13, sub=None, idle=False):
-    """node box. idle: outline LINE + muted label (still legible, visually recessive)."""
-    x0, y0, x1, y1 = xy
-    oc = LINE if idle else color
-    d.rounded_rectangle(xy, 6, fill=mix(fill, alpha), outline=mix(oc, alpha), width=2)
-    f = font(size)
-    lc = MUTED if idle else FG
-    cy = (y0 + y1) / 2
-    d.text(((x0 + x1) / 2 - f.getlength(label) / 2, cy - size / 2 - (8 if sub else 2)), label, font=f, fill=mix(lc, alpha))
-    if sub:
-        f2 = font(size - 1)
-        d.text(((x0 + x1) / 2 - f2.getlength(sub) / 2, cy + 6), sub, font=f2, fill=mix(MUTED if idle else color, alpha))
-
-
-def arrow(d, a, b, color, alpha=1.0, prog=1.0):
-    (x0, y0), (x1, y1) = a, b
-    xe, ye = x0 + (x1 - x0) * prog, y0 + (y1 - y0) * prog
-    d.line([a, (xe, ye)], fill=mix(color, alpha), width=2)
-    if prog >= 1:
-        d.polygon([(x1, y1), (x1 - 7, y1 - 4), (x1 - 7, y1 + 4)], fill=mix(color, alpha))
-
-
-def dot(d, a, b, p, color, alpha=1.0, r=4):
-    x, y = a[0] + (b[0] - a[0]) * p, a[1] + (b[1] - a[1]) * p
-    d.ellipse([x - r, y - r, x + r, y + r], fill=mix(color, alpha))
-
-
-def frame_base(title, subtitle):
-    """hierarchy: title (accent, 22) > subtitle (muted, 13) > hairline > content; 32 px margins"""
-    img = Image.new("RGB", (W, H), BG)
-    d = ImageDraw.Draw(img)
-    d.text((32, 22), title, font=font(22), fill=ACCENT)
-    d.text((32, 54), subtitle, font=font(13), fill=MUTED)
-    d.line([(32, 82), (W - 32, 82)], fill=LINE)
-    return img, d
-
-
-def panel(d, xy, title, alpha=1.0):
-    d.rounded_rectangle(xy, 8, fill=PANEL, outline=LINE)
-    d.text((xy[0] + 14, xy[1] + 8), title, font=font(11), fill=MUTED)
-
-
-def build(render, duration, out, keep=None):
-    """render(t) -> PIL image, deterministic. Assembles out (GIF) via ffmpeg palettegen."""
-    n = int(round(duration * FPS))
-    tmp = Path(tempfile.mkdtemp(prefix="demo-"))
-    try:
-        for i in range(n):
-            render(i / FPS).save(tmp / f"f{i:04d}.png")
-        pal = tmp / "pal.png"
-        src = ["-framerate", str(FPS), "-i", str(tmp / "f%04d.png")]
-        subprocess.run(["ffmpeg", "-v", "error", "-y", *src, "-vf", "palettegen=stats_mode=full:max_colors=64", str(pal)], check=True)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", *src, "-i", str(pal), "-lavfi", "paletteuse=dither=none", "-loop", "0", str(out)], check=True)
-        if keep:
-            Path(keep).mkdir(parents=True, exist_ok=True)
-            for i in keep_idx(n):
-                shutil.copy(tmp / f"f{i:04d}.png", Path(keep) / f"f{i:04d}.png")
-    finally:
-        shutil.rmtree(tmp)
-    print(f"{out}: {n} frames @ {FPS} fps = {n / FPS:.1f}s, {Path(out).stat().st_size / 1024:.0f} KiB")
-
-
-def keep_idx(n):
-    return [int(n * k) for k in (0.15, 0.35, 0.55, 0.75, 0.9)]
-# ---- end kit ----
 
 # ---------------------------------------------------------------------------
 # claude-agent-continuity demo.
 #   python3 docs/media/demo.py capture   -> runs the REAL CLI in a throwaway repo, writes capture.json
-#   python3 docs/media/demo.py           -> renders docs/media/demo.gif from capture.json
-# render(t) is a pure function of time; nothing random, no wall clock.
+#   python3 docs/media/demo.py [out.gif] -> renders docs/media/demo.gif from capture.json
+#   python3 docs/media/demo.py --frame 5.5 out.png   (single frame)
+# render(t) is a pure function of time; no randomness, no wall clock.
 # ---------------------------------------------------------------------------
-CAP = HERE / "capture.json"
-BIN = HERE.parent.parent / "bin" / "claude-agent-continuity.mjs"
-DURATION = 11.5
+CAP = HERE / 'capture.json'
+BIN = HERE.parent.parent / 'bin' / 'claude-agent-continuity.mjs'
+T = 11.5
+SC = [(0.5, 3.5), (3.5, 5.6), (5.6, 10.9)]
 
 
 def sh(cwd, *a, env=None):
@@ -179,102 +187,83 @@ def sh(cwd, *a, env=None):
 
 
 def capture():
-    root = Path(tempfile.mkdtemp(prefix="cac-demo-"))
-    env = {**os.environ, "LC_ALL": "C", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
-           "GIT_AUTHOR_NAME": "dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
-           "GIT_COMMITTER_NAME": "dev", "GIT_COMMITTER_EMAIL": "dev@example.com"}
-    g = lambda cwd, *a: sh(cwd, "git", *a, env=env)
-    repo, wt = root / "myapp", root / "agent-auth"
-    repo.mkdir(); g(repo, "init", "-q", "-b", "main")
-    (repo / "app.js").write_text("// app\n"); g(repo, "add", "-A"); g(repo, "commit", "-qm", "init")
-    g(repo, "worktree", "add", "-q", "-b", "agent/auth", str(wt))
-    (wt / "docs/handoff").mkdir(parents=True); (wt / "docs/handoff/auth.md").write_text("# auth: login done, sessions next\n")
-    g(wt, "add", "-A"); g(wt, "commit", "-qm", "auth: scaffold")
-    (wt / "login.js").write_text("export const login = () => {}\n")       # the agent was cut off here:
-    (wt / "session.js").write_text("export const session = () => {}\n")   # three files never committed
-    with open(wt / "app.js", "a") as f: f.write("import './login.js'\n")
-    run = lambda *a: sh(repo, "node", str(BIN), *a, env=env).replace(str(root), "~/work").rstrip("\n")
-    steps = [("claude-agent-continuity status", run("status")),
-             ("claude-agent-continuity wip", run("wip")),
-             ("claude-agent-continuity resume agent-auth", run("resume", "agent-auth"))]
-    CAP.write_text(json.dumps([{"cmd": c, "out": o} for c, o in steps], indent=2) + "\n")
+    root = Path(tempfile.mkdtemp(prefix='cac-demo-'))
+    env = {**os.environ, 'LC_ALL': 'C', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_SYSTEM': '/dev/null',
+           'GIT_AUTHOR_NAME': 'dev', 'GIT_AUTHOR_EMAIL': 'dev@example.com',
+           'GIT_COMMITTER_NAME': 'dev', 'GIT_COMMITTER_EMAIL': 'dev@example.com'}
+    g = lambda cwd, *a: sh(cwd, 'git', *a, env=env)
+    repo, wt = root / 'myapp', root / 'agent-auth'
+    repo.mkdir(); g(repo, 'init', '-q', '-b', 'main')
+    (repo / 'app.js').write_text('// app\n'); g(repo, 'add', '-A'); g(repo, 'commit', '-qm', 'init')
+    g(repo, 'worktree', 'add', '-q', '-b', 'agent/auth', str(wt))
+    (wt / 'docs/handoff').mkdir(parents=True); (wt / 'docs/handoff/auth.md').write_text('# auth: login done, sessions next\n')
+    g(wt, 'add', '-A'); g(wt, 'commit', '-qm', 'auth: scaffold')
+    (wt / 'login.js').write_text('export const login = () => {}\n')       # the agent was cut off here:
+    (wt / 'session.js').write_text('export const session = () => {}\n')   # three files never committed
+    with open(wt / 'app.js', 'a') as f: f.write("import './login.js'\n")
+    run = lambda *a: sh(repo, 'node', str(BIN), *a, env=env).replace(str(root), '~/work').rstrip('\n')
+    steps = [('claude-agent-continuity status', run('status')),
+             ('claude-agent-continuity wip', run('wip')),
+             ('claude-agent-continuity resume agent-auth', run('resume', 'agent-auth'))]
+    CAP.write_text(json.dumps([{'cmd': c, 'out': o} for c, o in steps], indent=2) + '\n')
     shutil.rmtree(root)
 
 
 def colorize(line):
-    if line.startswith("*"): return [("*", WARN), (line[1:], FG)] if "dirty" not in line else _row(line, WARN)
-    if line.startswith("o "): return _row(line, OK)
-    if line.startswith("WIP saved"): return [(line, OK)]
-    if line.startswith("-- "): return [(line, ACCENT)]
-    if line.startswith("    "): return [(line, MUTED)]
-    return [(line, FG)]
+    if line.startswith('WIP saved'): return [(line, OK)]
+    if line.startswith('-- '): return [(line, ACCENT)]
+    if line.startswith('    '): return [(line, MUTED)]
+    for mark, col in (('* ', WARN), ('o ', OK)):
+        if line.startswith(mark):
+            key = '3 dirty' if mark == '* ' else 'clean'
+            j = line.find(key)
+            if j > 0:
+                return [(mark, col), (line[2:j], TEXT), (key, col), (line[j + len(key):], TEXT)]
+    return [(line, TEXT)]
 
 
-def _row(line, c):
-    out, i = [(line[0], c)], 1
-    for key, col in (("3 dirty", WARN), ("clean", OK)):
-        j = line.find(key)
-        if j > 0:
-            out += [(line[1:j], FG), (key, col), (line[j + len(key):], FG)]
-            return out
-    return out + [(line[1:], FG)]
-
-
-def page(step, t0):
-    lines = [{"t": t0, "type": True, "segs": [("$ ", OK), (step["cmd"], FG)]}]
-    t = t0 + len(step["cmd"]) / 55 + 0.35
-    for raw in step["out"].split("\n"):
+def lines_for(step, t0):
+    out = [{'t': t0, 'type': True, 'segs': [('$ ', OK), (step['cmd'], TEXT)]}]
+    t = t0 + len(step['cmd']) / 55 + 0.35
+    for raw in step['out'].split('\n'):
         for w in (wrap(raw, 84) if len(raw) > 112 else [raw]):
-            lines.append({"t": t, "segs": colorize(w) if w else [("", FG)]})
+            out.append({'t': t, 'segs': colorize(w) if w else [('', TEXT)]})
         t += 0.12
-    return lines
+    return out
 
 
 def fit(step):
-    n = max(len(l) if len(l) <= 112 else 84 for l in step["out"].split("\n"))
-    return max(11, min(13, int(700 / (0.6 * n))))
-
-
-def load():
-    return json.loads(CAP.read_text())
-
-
-# scene start times (s) and end times
-SC = [(0.4, 3.4), (3.4, 5.6), (5.6, 11.0)]
+    n = max(len(l) if len(l) <= 112 else 84 for l in step['out'].split('\n'))
+    return max(10, min(13, int(700 / (0.6 * n))))
 
 
 def render(t, cap=None):
-    cap = cap or load()
-    img, d = frame_base("claude-agent-continuity", "never lose a cut-off Claude Code subagent's work")
-    panel(d, (32, 96, 768, 282), "~/work/myapp   output captured from the real CLI")
+    cap = cap or json.loads(CAP.read_text())
+    cv = Cv()
+    header(cv, 'claude-agent-continuity', "never lose a cut-off Claude Code subagent's work")
+    panel(cv, (32, 96, 768, 282), '~/work/myapp   output captured from the real CLI')
     for (a, b), step in zip(SC, cap):
         al = window(t, a, b)
         if al > 0:
-            lines = page(step, a + 0.2)
-            layer = Image.new("RGB", (W, H), PANEL); ld = ImageDraw.Draw(layer)
             sz = fit(step)
-            term_lines(ld, t, lines, 46, 122, lh=sz + 6, size=sz, alpha=1.0, cps=55)
-            mask = Image.new("L", (W, H), 0)
-            ImageDraw.Draw(mask).rectangle([34, 120, 766, 280], fill=round(255 * al))
-            img.paste(layer, (0, 0), mask)
-    # diagram: cut-off agent -> WIP commit -> resume prompt
+            term(cv, t, lines_for(step, a + 0.2), 46, 122, sz + 6, sz, al=al)
     dy = 312
-    g = window(t, 0.3, 11.2)
-    s2, s3 = ease(seg(t, 4.5, 5.0)), ease(seg(t, 6.9, 7.4))
-    rbox(d, (32, dy, 242, dy + 84), "agent worktree", ERR if t < 4.5 else OK, g,
-         sub="cut off, 3 files dirty" if t < 4.5 else "all committed")
-    rbox(d, (295, dy, 505, dy + 84), "WIP commit", OK, g, sub="agent/auth +2" if t >= 5.0 else "pending", idle=t < 4.5)
-    rbox(d, (558, dy, 768, dy + 84), "resume prompt", ACCENT, g, sub="reads handoff + git log" if t >= 7.4 else "pending", idle=t < 6.9)
-    arrow(d, (242, dy + 42), (295, dy + 42), OK, g, s2)
-    arrow(d, (505, dy + 42), (558, dy + 42), ACCENT, g, s3)
-    if 4.5 <= t < 5.0: dot(d, (242, dy + 42), (295, dy + 42), s2, OK, g)
-    if 6.9 <= t < 7.4: dot(d, (505, dy + 42), (558, dy + 42), s3, ACCENT, g)
-    d.text((32, 414), "zero dependencies  |  Node >= 18  |  Claude Code hooks: SubagentStop, Stop", font=font(12), fill=mix(MUTED, g))
-    return img
+    cut = t < 4.5
+    node(cv, 32, dy, 242, dy + 84, 'agent worktree', 'cut off, 3 files dirty' if cut else 'all committed', ERROR if cut else OK)
+    node(cv, 295, dy, 505, dy + 84, 'WIP commit', 'agent/auth +2' if t >= 4.5 else 'pending', OK, idle=cut)
+    node(cv, 558, dy, 768, dy + 84, 'resume prompt', 'reads handoff + git log' if t >= 6.9 else 'pending', ACCENT, idle=t < 6.9)
+    for (x0, x1, c, a, b) in ((242, 295, OK, 4.5, 5.0), (505, 558, ACCENT, 6.9, 7.4)):
+        p = ease(seg(t, a, b))
+        if p > 0:
+            cv.arrow(x0, dy + 42, x0 + (x1 - x0) * max(p, .05), dy + 42, c)
+        if 0 < p < 1:
+            cv.dot(x0 + (x1 - x0) * p, dy + 42, c)
+    cv.text(32, 414, 'zero dependencies  |  Node >= 18  |  Claude Code hooks: SubagentStop, Stop', 12, MUTED)
+    return finish(cv, t, T)
 
 
-if __name__ == "__main__":
-    if "capture" in sys.argv:
+if __name__ == '__main__':
+    if sys.argv[1:2] == ['capture']:
         capture()
     else:
-        build(render, DURATION, HERE / "demo.gif", keep=(sys.argv[sys.argv.index("--keep") + 1] if "--keep" in sys.argv else None))
+        cli(render, T, HERE / 'demo.gif')
